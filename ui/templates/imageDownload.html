@@ -1,0 +1,46 @@
+{% load my_filter %}
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>SIP Analyzer - Saved {{ title }} ({% current_time '%Y-%m-%d %H:%M' 0 %})</title>
+
+        <script src="http://code.jquery.com/jquery-1.11.3.min.js"></script>
+        <script src="http://code.jquery.com/jquery-migrate-1.2.1.min.js"></script>
+
+        <!-- Latest compiled and minified CSS -->
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.4/css/bootstrap.min.css">
+
+        <!-- Optional theme -->
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.4/css/bootstrap-theme.min.css">
+
+        <!-- Latest compiled and minified JavaScript -->
+        <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.4/js/bootstrap.min.js"></script>
+
+        <link rel="stylesheet" type="text/css" href="http://www.jeasyui.com/easyui/themes/ui-cupertino/easyui.css">
+        <link rel="stylesheet" type="text/css" href="http://www.jeasyui.com/easyui/themes/icon.css">
+        <script type="text/javascript" src="http://www.jeasyui.com/easyui/jquery.easyui.min.js"></script>
+
+        </head>
+<body>
+
+<script type="text/javascript" >
+    var messages = {{ msg|safe }};
+
+    function openDiag(id) {
+        $('#dlg').dialog('open');
+        $('#dlg').dialog('setTitle', "Message: " + id);
+        $('#dlg').window('center');
+
+        msg = '<pre style="white-space: pre-wrap">' + messages[id] + '</pre>';
+
+        $('#dialogBoxTxt').empty().append(msg);
+    }
+</script>
+
+<div id="dlg" class="easyui-dialog" data-options="closed: true, resizable:true, minimizable: false, maximizable:true, collapsible: false, " style="width:500px; height:400px;">
+    <span id="dialogBoxTxt"> </span>
+</div>
+
+<img usemap="#imgMap" src="{{ image|safe}}">
+{{ imageMap|safe }}

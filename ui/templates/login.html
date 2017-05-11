@@ -1,0 +1,139 @@
+{% load staticfiles %}
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>SIP Analyzer - Login</title>
+
+        <script src="//code.jquery.com/jquery-1.11.2.min.js"></script>
+        <script src="//code.jquery.com/jquery-migrate-1.2.1.min.js"></script>
+        <script src="//code.jquery.com/ui/1.11.2/jquery-ui.min.js"></script>
+        <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/jqueryui/1.11.2/jquery-ui.min.css" />
+
+        <!-- Latest compiled and minified CSS -->
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.4/css/bootstrap.min.css">
+
+        <!-- Optional theme -->
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.4/css/bootstrap-theme.min.css">
+
+        <!-- Latest compiled and minified JavaScript -->
+        <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.4/js/bootstrap.min.js"></script>
+
+        {{ form.media }}
+<style>
+body {
+    background-origin: padding-box;
+    background-position: left center;
+    background-repeat: repeat;
+    background-size: 200% auto;
+    background-image: url("/static/img/bg-clouds.png");
+}
+
+#background {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-image: url('/static/img/cloud2.png');
+    background-repeat: repeat;
+    background-attachment: fixed;
+    background-position: left center;
+    background-size: 150%;
+    opacity: 0.5;
+    z-index: -1;
+}
+
+
+.modal .modal-dialog {
+    width: 400px;
+    margin-top: 10%;
+}
+</style>
+
+</head>
+
+<script>
+    $(function(){
+        var x = 0;
+        setInterval(function(){
+            x-=2;
+            $('#background').css('background-position', x );
+        }, 60);
+    })
+</script>
+
+<body>
+<div id="background"></div>
+
+{% if user.is_authenticated %}
+<div class="col-md-offset-4 col-md-4">
+    <div class="alert alert-success" role="alert">
+        <span class="glyphicon glyphicon-ok" aria-hidden="true"></span>
+        <span class="sr-only">OK:</span>
+        You are logged in. <a href='{{next|default:"/"}}'>Proceed request</a>
+    </div>
+</div>
+{% else %}
+
+{%if form.non_field_errors %}
+    <div class="col-md-offset-3 col-md-6">
+        <div class="alert alert-danger" role="alert">
+            <ul class="list-inline">
+                <li>
+                    <span class="glyphicon glyphicon-exclamation-sign" aria-hidden="true"></span>
+                    <span class="sr-only">Error:</span>
+                </li>
+                {% for error in form.non_field_errors %}
+                    <li>{{ error|escape }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+{% endif %}
+
+<div id="loginModal" class="modal show" tabindex="-1" role="dialog" aria-hidden="true">
+    <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title"><img alt="Eye" height="70" src="/static/img/eye.png" > Login </h3>
+            </div>
+
+            <div class="modal-body">
+                <form method="post" action="{% url 'login' %}">
+                {% csrf_token %}
+
+                <div class="form-group">
+                    <div class="input-group">
+                        <span class="input-group-addon">
+                            <i class="glyphicon glyphicon-user"></i>
+                        </span>
+                        <input class="form-control" placeholder="Username"  id="id_username" name="username" type="text">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <div class="input-group">
+                        <span class="input-group-addon">
+                            <i class="glyphicon glyphicon-lock"></i>
+                        </span>
+                        <input class="form-control" id="id_password" name="password" type="password" placeholder="Password">
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <div class="form-group ">
+                    <input type="hidden" name="next" value="{{next|default:'/'}}" />
+                    <button type="submit" value="login" class="btn btn-primary btn-md btn-block">Sign In</button>
+                    </form>
+                </div>
+            </div>
+
+        </div><!-- /.modal-content -->
+    </div><!-- /.modal-dialog -->
+</div><!-- /.modal -->
+{% endif %}
+
+</body>
+</html>

@@ -1,0 +1,40 @@
+<center><span style="font-size: 18px; font-family: arial; padding: 10px">Rows in storage node per hour</span></center>
+<div id="graph" style="min-height: 500px; padding: 5px;">
+    <span id="panel-loading" class="panel-loading">Loading...</span>
+</div>
+
+<script>
+$(document).ready(function() {
+    $.getJSON( "/dashBoardData?days=1&type=data-per-hour", function( json ) {
+        //console.log(json.content);
+
+        Morris.Bar({
+          element: 'graph',
+          data: json.content,
+          axes: true,
+          grid: true,
+          resize: true,
+          xkey: 'label',
+          ykeys: ['ok', 'mal'],
+          labels: ['Rows', 'Malformed']
+        });
+    })
+    .done(function() {
+        $('#panel-loading').hide();
+        $('#graph').resize()
+    })
+    .error(function( jqxhr, textStatus, error ) {
+        console.log(jqxhr.responseText);
+
+        var err = jqxhr.statusText;
+        $('#panel-loading').empty().append('Request error: ' + err);
+    })
+    .fail(function( jqxhr, textStatus, error ) {
+        d = JSON.parse(jqxhr.responseText);
+        var err = textStatus + ", " + d.error;
+        $('#panel-loading').empty().append('Request failed: ' + err);
+    });
+
+});
+
+</script>

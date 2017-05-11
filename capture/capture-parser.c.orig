@@ -1,0 +1,811 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
+#ifndef PTHREAD
+#define PTHREAD
+#endif
+
+#ifndef HAVE_PF_RING
+#define HAVE_PF_RING
+#endif
+
+#include <features.h>
+#include <sys/syscall.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <math.h>
+#include <errno.h>
+#include <string.h>
+#include <semaphore.h>
+#include <malloc.h>
+#include <jemalloc/jemalloc.h>
+#include <sys/types.h>
+#include <sys/sysinfo.h>
+#include <zmq.h>
+#include <inttypes.h>
+#include <sys/time.h>
+#include <ctype.h>
+#include <wchar.h>
+#include <sched.h>
+
+#include <pfring.h>
+
+#include <osipparser2/osip_parser.h>
+
+#include "lib/base64/include/libbase64.h"
+
+#include "statsd-client.h"
+
+#include "capture.h"
+#include "capture-parser-osip.h"
+
+#define ALARM_SLEEP 1
+
+#define ZMQ_DEVICE_FE "inproc://zmq-device-fe.inproc"
+#define ZMQ_PROXY_STATS_IPC "inproc://zmq-proxy-stats.inproc"
+
+char *statsd_host = "127.0.0.1";
+u_short statsd_port = 8125;
+
+char *zmq_capture_addr = NULL;
+
+int thread_multi = 0;
+
+void *_zmq_context;
+void *_zmq_frontend;
+void *_zmq_backend;
+
+pthread_t zmq_device_main_thread;
+pthread_t zmq_device_stats_thread;
+
+struct thread_stats {
+    char name[32];
+
+    u_int64_t numPkts;
+    u_int64_t brokenPkts;
+
+    u_int64_t numBytes;
+    volatile u_int64_t parseTime;
+
+    u_int64_t zdropPkts;
+    u_int64_t zfailedPkts;
+
+    void *zmq_socket;
+    void *zmq_socket_res;
+
+    pthread_t pd_thread;
+};
+struct thread_stats *threads;
+
+u_short num_thread;
+
+pthread_mutex_t do_shutdown;
+pthread_mutexattr_t mattr;
+
+int zmq_linger_time = 1;
+int zmq_hwm_msg = 100<<10;
+int zmq_sndtimeo = 0;
+
+u_short verbose = 0;
+
+/* ------------------------------------------ */
+
+static
+void print_stats(void) {
+    statsd_link *link = NULL;
+
+    char buf[512];
+
+    link = statsd_init(statsd_host, statsd_port);
+
+    if(link) {
+        for(int i=0; i<num_thread; i++) {
+            snprintf(buf, sizeof(buf), "parser.%s.packets", threads[i].name);
+            statsd_gauge(link, buf, (long unsigned int)threads[i].numPkts);
+            if(verbose >= 3)
+                debug_print("%s %lu", buf, (long unsigned int)threads[i].numPkts);
+
+            snprintf(buf, sizeof(buf), "parser.%s.brokenPkts", threads[i].name);
+            statsd_gauge(link, buf, (long unsigned int)threads[i].brokenPkts);
+            if(verbose >= 3)
+                debug_print("%s %lu", buf, (long unsigned int)threads[i].brokenPkts);
+            
+            snprintf(buf, sizeof(buf), "parser.%s.bytes", threads[i].name);
+            statsd_gauge(link, buf, (long unsigned int)threads[i].numBytes);
+            if(verbose >= 3)
+                debug_print("%s %lu", buf, (long unsigned int)threads[i].numBytes);
+            
+            snprintf(buf, sizeof(buf), "parser.%s.parseTime", threads[i].name);
+            statsd_timing(link, buf, (long unsigned int)threads[i].parseTime);
+            if(verbose >= 3)
+                debug_print("%s %lu", buf, (long unsigned int)threads[i].parseTime);
+
+            snprintf(buf, sizeof(buf), "parser.%s.zfailedPkts", threads[i].name);
+            statsd_gauge(link, buf, (long unsigned int)threads[i].zfailedPkts);
+            if(verbose >= 3)
+                debug_print("%s %lu", buf, (long unsigned int)threads[i].zfailedPkts);
+
+            snprintf(buf, sizeof(buf), "parser.%s.zdropPkts", threads[i].name);
+            statsd_gauge(link, buf, (long unsigned int)threads[i].zdropPkts);
+            if(verbose >= 3)
+                debug_print("%s %lu", buf, (long unsigned int)threads[i].zdropPkts);
+
+            threads[i].parseTime = 0;
+        }
+    }
+
+    statsd_finalize(link);
+}
+
+static 
+void my_sigalarm(int sig) {
+    print_stats();
+    alarm(ALARM_SLEEP);
+    signal(SIGALRM, my_sigalarm);
+}
+
+/* ------------------------------------------ */
+
+void zmq_device_stats_main_cleanup(void *args) {
+    int rc;
+    info_print("%s started", __FUNCTION__);
+
+    rc = zmq_close(args);
+    if (rc != 0) {
+        warn_print("zmq_close zmq_stats_sock failed: (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+    } else {
+        debug_print("zmq_close zmq_stats_sock closed");
+    }
+
+    info_print("%s completed", __FUNCTION__);
+}
+
+static void *zmq_device_stats_main(void *args) {
+    void *zmq_stats_sock;
+    int rc;
+
+    pthread_cleanup_push((void *)thread_exit_func, "res_coll_main_capture_thread");
+    
+    rc = pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    if (rc != 0) {
+        err_print("pthread_setcancelstate PTHREAD_CANCEL_ENABLE failed (%d): %s", errno, strerror(errno));
+    }
+
+    zmq_stats_sock = zmq_socket (_zmq_context, ZMQ_SUB);
+
+    pthread_cleanup_push((void *)zmq_device_stats_main_cleanup, zmq_stats_sock);
+
+    zmq_setsockopt_func(zmq_stats_sock);
+
+    rc = zmq_setsockopt(zmq_stats_sock, ZMQ_SUBSCRIBE, "", 0);
+    if (rc != 0) {
+        err_print("zmq_setsockopt ZMQ_SUBSCRIBE failed (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        raise(SIGTERM);
+    }
+
+    zmq_getsockopt_values(zmq_stats_sock);
+
+    while(!needQuit(&do_shutdown) && zmq_connect (zmq_stats_sock, ZMQ_PROXY_STATS_IPC) != 0 ) {
+        err_print("zmq_connect failed (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        sleep(1);
+    }
+
+    info_print("entering main loop");
+    while(!needQuit(&do_shutdown)) {
+        pthread_testcancel();
+
+        int nbytes = zmq_recv(zmq_stats_sock, NULL, 0, 0);
+        if(nbytes > 0) {
+            if(verbose >=4)
+                debug_print("nbytes: %d", nbytes);
+            // stats here
+        }
+    }
+
+    pthread_cleanup_pop(1);
+    pthread_cleanup_pop(2);
+    pthread_exit(0);
+}
+
+/* ------------------------------------------ */
+
+void zmq_device_main_cleanup(void *args) {
+    int rc;
+    info_print("%s started", __FUNCTION__);
+
+    rc = zmq_close(_zmq_frontend);
+    if (rc != 0) {
+        warn_print("zmq_close _zmq_frontend failed: (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+    } else {
+        debug_print("zmq_close _zmq_frontend closed");
+    }
+
+    rc = zmq_close(_zmq_backend);
+    if (rc != 0) {
+        warn_print("zmq_close _zmq_backend failed: (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+    } else {
+        debug_print("zmq_close _zmq_backend closed");
+    }
+
+    info_print("%s completed", __FUNCTION__);
+}
+
+static void *zmq_device_main(void* args) {
+    int rc;
+    int zmq_sndtimeo=-1;
+
+    pthread_cleanup_push((void *)thread_exit_func, "zmq_device_main");
+    pthread_cleanup_push((void *)zmq_device_main_cleanup, NULL);
+
+    rc = pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    if (rc != 0) {
+        err_print("pthread_setcancelstate PTHREAD_CANCEL_ENABLE failed (%d): %s", errno, strerror(errno));
+        pthread_exit(0);
+    }
+
+    /* ------------------------------------------ */
+
+    _zmq_frontend = zmq_socket (_zmq_context, ZMQ_DEALER);
+    rc = zmq_bind (_zmq_frontend, ZMQ_DEVICE_FE);
+    if (rc != 0) {
+        err_print("zmq_bind _zmq_frontend failed (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        raise(SIGTERM);
+        goto error;
+    }
+
+    zmq_setsockopt_func(_zmq_frontend);
+
+    rc = zmq_setsockopt(_zmq_frontend, ZMQ_SNDTIMEO, &zmq_sndtimeo, sizeof(zmq_sndtimeo));
+    if (rc != 0) {
+        err_print("zmq_setsockopt ZMQ_SNDTIMEO failed (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        raise(SIGTERM);
+    }
+
+    rc = zmq_setsockopt(_zmq_frontend, ZMQ_RCVTIMEO, &zmq_sndtimeo, sizeof(zmq_sndtimeo));
+    if (rc != 0) {
+        err_print("zmq_setsockopt ZMQ_RCVTIMEO failed (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        raise(SIGTERM);
+    }
+
+    zmq_getsockopt_values(_zmq_frontend);
+
+    /* ------------------------------------------ */
+
+    _zmq_backend = zmq_socket (_zmq_context, ZMQ_PUB);
+    rc = zmq_bind (_zmq_backend, ZMQ_PROXY_STATS_IPC);
+    if (rc != 0) {
+        err_print("zmq_bind _zmq_frontend failed (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        raise(SIGTERM);
+        goto error;
+    }
+
+    rc = zmq_bind (_zmq_backend, "tcp://*:6667");
+    if (rc != 0) {
+        err_print("zmq_bind _zmq_frontend failed (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        raise(SIGTERM);
+        goto error;
+    }
+
+    zmq_setsockopt_func(_zmq_backend);
+
+    rc = zmq_setsockopt(_zmq_backend, ZMQ_SNDTIMEO, &zmq_sndtimeo, sizeof(zmq_sndtimeo));
+    if (rc != 0) {
+        err_print("zmq_setsockopt ZMQ_SNDTIMEO failed (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        raise(SIGTERM);
+    }
+
+    rc = zmq_setsockopt(_zmq_backend, ZMQ_RCVTIMEO, &zmq_sndtimeo, sizeof(zmq_sndtimeo));
+    if (rc != 0) {
+        err_print("zmq_setsockopt ZMQ_RCVTIMEO failed (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        raise(SIGTERM);
+    }
+
+    zmq_getsockopt_values(_zmq_backend);
+
+    info_print("entering main loop");
+
+    pthread_testcancel();
+
+    //rc = zmq_proxy(_zmq_frontend, _zmq_backend, _zmq_capture);
+    rc = zmq_device(ZMQ_QUEUE, _zmq_frontend, _zmq_backend);
+    if (rc != 0) {
+        err_print("zmq_device failed (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        raise(SIGTERM);
+        goto error;
+    }
+
+error:
+    pthread_cleanup_pop(1);
+    pthread_cleanup_pop(2);
+    pthread_exit(0);
+}
+
+/* ------------------------------------------ */
+
+void parser_main_thread_cleanup(void *args) {
+    int i = (intptr_t)args;
+
+    int rc;
+    info_print("%s started", __FUNCTION__);
+
+    if(threads[i].zmq_socket) {
+        rc = zmq_close(threads[i].zmq_socket);
+        if (rc != 0) {
+            warn_print("zmq_close zmq_socket failed: (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        } else {
+            debug_print("zmq_close zmq_socket closed");
+        }
+    }
+
+    if(threads[i].zmq_socket_res) {
+        rc = zmq_close(threads[i].zmq_socket_res);
+        if (rc != 0) {
+            warn_print("zmq_close zmq_socket_res failed: (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        } else {
+            debug_print("zmq_close zmq_socket_res closed");
+        }
+    }
+
+    info_print("%s completed", __FUNCTION__);
+}
+
+static void *parser_main_thread(void* args) {
+    int i = (intptr_t)args;
+    int rc;
+
+    int64_t startTime;
+    struct pfring_pkthdr h;
+
+    u_char *p = NULL;
+
+    struct rslt_sip_message *ret;
+    size_t encoded_pkt_len;
+
+    char buf[4096];
+    char *encoded_pkt;
+    
+    pthread_cleanup_push((void *)thread_exit_func, threads[i].name);
+    pthread_cleanup_push((void *)parser_main_thread_cleanup, (void *)(intptr_t)i);
+
+    rc = pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    if (rc != 0) {
+        err_print("pthread_setcancelstate PTHREAD_CANCEL_ENABLE failed (%d): %s", errno, strerror(errno));
+        pthread_exit(0);
+    }
+
+    threads[i].zmq_socket = zmq_socket (_zmq_context, ZMQ_DEALER);
+
+    if(zmq_connect (threads[i].zmq_socket, zmq_capture_addr) != 0) {
+        err_print("zmq_connect failed (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        goto error;
+    }
+
+    zmq_setsockopt_func(threads[i].zmq_socket);
+
+    rc = zmq_setsockopt(threads[i].zmq_socket, ZMQ_SNDTIMEO, &zmq_sndtimeo, sizeof(zmq_sndtimeo));
+    if (rc != 0) {
+        err_print("zmq_setsockopt ZMQ_SNDTIMEO failed (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        raise(SIGTERM);
+    }
+
+    rc = zmq_setsockopt(threads[i].zmq_socket, ZMQ_RCVTIMEO, &zmq_sndtimeo, sizeof(zmq_sndtimeo));
+    if (rc != 0) {
+        err_print("zmq_setsockopt ZMQ_RCVTIMEO failed (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        raise(SIGTERM);
+    }
+
+    zmq_getsockopt_values(threads[i].zmq_socket);
+
+    /* ---------------------------------------- */
+
+    threads[i].zmq_socket_res = zmq_socket (_zmq_context, ZMQ_DEALER);
+
+    if(zmq_connect (threads[i].zmq_socket_res, ZMQ_DEVICE_FE) != 0) {
+        err_print("zmq_connect failed (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        goto error;
+    }
+    
+    zmq_setsockopt_func(threads[i].zmq_socket_res);
+    zmq_getsockopt_values(threads[i].zmq_socket_res);
+    
+    debug_print("zmq_getsockopt_values zmq_socket_res");
+    zmq_getsockopt_values(threads[i].zmq_socket_res);
+
+    info_print("entering main loop");
+
+    parser_init();
+
+    while(!needQuit(&do_shutdown)) {
+        pthread_testcancel();
+
+        zmq_msg_t msg_h;
+
+        rc = zmq_msg_init(&msg_h);
+        if (rc != 0) {
+            err_print("zmq_msg_init failed (%d): %s", zmq_errno(), strerror(zmq_errno()));    
+            goto error_zmq;
+        }
+
+        /*  msg_h */
+        rc = zmq_msg_recv(&msg_h, threads[i].zmq_socket, 0);
+        if (rc == -1) {
+            //err_print("zmq_msg_recv failed (%d): %s", zmq_errno(), strerror(zmq_errno()));
+            continue;
+        }
+
+        threads[i].numPkts++;
+
+        if (!zmq_msg_more (&msg_h)) {
+            threads[i].brokenPkts += 1;
+            goto error_zmq;
+        }
+
+        zmq_msg_t msg_p;
+
+        rc = zmq_msg_init(&msg_p);
+        if (rc != 0) {
+            err_print("zmq_msg_init failed (%d): %s", zmq_errno(), strerror(zmq_errno()));    
+            goto error_zmq;
+        }
+
+        /*  msg_p */
+        rc = zmq_msg_recv(&msg_p, threads[i].zmq_socket, 0);
+        if (rc == -1) {
+            err_print("zmq_msg_recv failed (%d): %s", zmq_errno(), strerror(zmq_errno()));
+            goto error_zmq;
+        }
+
+        startTime = clock_usecs();
+
+        /*  msg_h */
+        size_t msg_h_size = zmq_msg_size(&msg_h);
+
+        memcpy(&h, zmq_msg_data(&msg_h), msg_h_size);
+
+        size_t msg_p_size = zmq_msg_size(&msg_p);
+
+        p = (u_char *)malloc( msg_p_size + 1);
+        memcpy(p, zmq_msg_data(&msg_p), msg_p_size);
+
+        threads[i].numBytes += msg_h_size + msg_p_size;
+
+        u_char *payload;
+        payload = (u_char*)(p + h.extended_hdr.parsed_pkt.offset.payload_offset);
+
+        ret = (struct rslt_sip_message*) malloc(sizeof(struct rslt_sip_message));
+
+        rc = parseSIP((char *)payload, ret);
+
+        if(rc !=0) {
+            err_print("parseSIP failed %d", rc);
+            goto error_zmq;
+        }
+                /*
+                    "{\
+                        \"timestamp_ns\": %lu,\
+                        \"ip\": { \
+                            \"src.ip\": %u, \
+                            \"src.port\": %u, \
+                            \"dst.ip\": %u, \
+                            \"dst.port\": %u, \
+                            \"payload_offset\": %u \
+                        }, \
+                        \"sip\": { \
+                            \"call_id\": \"%s\", \
+                            \"to\": \"%s\", \
+                            \"from\": \"%s\", \
+                            \"sip_method\": \"%s\", \
+                            \"status_code\": %d, \
+                            \"rc_session_id\": \"%s\"\
+                        },\
+                        \"raw\": {\
+                            \"pkt\": \"%s\" \
+                        }\
+                    }"
+                */
+
+            //bin_to_strhex(p, h.len, &encoded_pkt);
+
+            encoded_pkt = (char *)malloc( h.len * 3 );
+            if(encoded_pkt == NULL) {
+                err_print("malloc encoded_pkt failed");
+                goto error_zmq;
+            }
+            base64_encode((char *)p, h.len, encoded_pkt, &encoded_pkt_len, 0);
+            -> encoded_pkt problem !!!
+/*
+            int buf_len = asprintf(&buf, JSON_RET_TMPL,
+                        h.extended_hdr.timestamp_ns,
+                        h.extended_hdr.parsed_pkt.ipv4_src,
+                        h.extended_hdr.parsed_pkt.l4_src_port,
+
+                        h.extended_hdr.parsed_pkt.ipv4_dst,
+                        h.extended_hdr.parsed_pkt.l4_dst_port,
+                        h.extended_hdr.parsed_pkt.offset.payload_offset,
+
+                        ret->call_id,
+                        ret->to,
+                        ret->from,
+                        ret->sip_method,
+                        ret->status_code,
+                        ret->rc_session_id,
+                        ret->ua,
+                        ret->maxfwd,
+
+                        ret->cseq.number,
+                        ret->cseq.method,
+
+                        encoded_pkt
+                        );
+*/
+
+            //int buf_len  = asprintf(&buf, "%lu %s", h.extended_hdr.timestamp_ns, encoded_pkt );
+            snprintf(&buf, sizeof(buf), "%lu %s", h.extended_hdr.timestamp_ns, ret->from);
+            insane_free(encoded_pkt);
+/*
+            if(buf_len < 0) {
+                err_print("asprintf buf failed (%d): %s", errno, strerror(errno));
+                goto error_zmq;
+            } else {
+                if(verbose > 1)
+                    info_print("%s", buf);
+            }
+*/
+            zmq_msg_t msg_res;
+            if(zmq_msg_init_data(&msg_res, buf, strlen(buf), NULL, NULL )) {
+                err_print("zmq_msg_init_data buf failed(%d) %s ", zmq_errno(), zmq_strerror(zmq_errno()) );
+            } else {
+
+                int loop_count = 0;
+                do {
+                    if (++loop_count > 3) {
+                        if(verbose)
+                            err_print("zmq_send loop count limit exceeded. Break msg");
+                        threads[i].zdropPkts++;
+                        break;
+                    }
+                    rc = zmq_msg_send(&msg_res, threads[i].zmq_socket_res, 0);
+                    if (rc == -1) {
+                        if(verbose)
+                            err_print("zmq_send failed: (%d): %s,\n'%s'", zmq_errno(), zmq_strerror(zmq_errno()), (char *)buf);
+
+                        threads[i].zfailedPkts++;
+                        sched_yield();
+                    } else {
+                        if(verbose > 0) 
+                            debug_print("zmq_msg_send successful (%zu): %s", strlen(buf), buf);
+                    }
+                } while (
+                    rc == -1 && zmq_errno() == EINTR
+                    );
+            }
+
+            threads[i].parseTime = fmax(clock_usecs()-startTime, threads[i].parseTime);
+
+error_zmq:
+            //insane_free(buf);
+            insane_free(ret);
+            insane_free(p);
+
+            zmq_msg_close(&msg_res);
+            zmq_msg_close(&msg_h);
+            zmq_msg_close(&msg_p);
+    }
+
+error:
+    pthread_cleanup_pop(1);
+    pthread_cleanup_pop(2);
+    pthread_exit(0);
+}
+
+/* ------------------------------------------ */
+
+static
+void sigproc(int signum) {
+    u_short i;
+
+    info_print("SIGNAL: %s(%d). Leaving.", strsignal(signum), signum);
+    signal(SIGALRM, SIG_IGN);
+
+    print_stats();
+
+    pthread_mutex_unlock(&do_shutdown);
+
+    sleep(1);
+
+    for(int i=0; i<num_thread; i++) {
+        if(threads[i].pd_thread && pthread_kill(threads[i].pd_thread, 0) == 0) {
+            debug_print("pthread_cancel to %s", threads[i].name);
+            pthread_cancel(threads[i].pd_thread);
+        } else {
+            warn_print("%s doesn't exists", threads[i].name);
+        }
+    }
+
+    if(zmq_device_stats_thread && pthread_kill(zmq_device_stats_thread, 0) == 0) {
+        debug_print("pthread_cancel to zmq_device_stats_thread");
+        pthread_cancel(zmq_device_stats_thread);
+    } else {
+        warn_print("zmq_device_stats_thread doesn't exists");
+    }
+
+    if(zmq_device_main_thread && pthread_kill(zmq_device_main_thread, 0) == 0) {
+        debug_print("pthread_cancel to zmq_device_main_thread");
+        pthread_cancel(zmq_device_main_thread);
+    } else {
+        warn_print("zmq_device_main_thread doesn't exists");
+    }
+
+}
+
+void main_exit(int exitStatus, void *arg) {
+    uint rc;
+
+    if (exitStatus > 0)
+        warn_print("exitStatus: %d", exitStatus);
+
+    for(int i=0; i<num_thread; i++) {
+        void *t_join_res;
+
+        if(threads == NULL)
+            continue;
+
+        info_print("waiting while exit '%s'", threads[i].name);
+
+        rc = pthread_join(threads[i].pd_thread, &t_join_res);
+        if (rc != 0)
+            warn_print("pthread_join on '%s' failed", threads[i].name);
+
+        if (t_join_res == PTHREAD_CANCELED)
+            warn_print("thread '%s' was canceled", threads[i].name);
+        else
+            info_print("thread '%s' was terminated normally", threads[i].name);
+    }
+
+    zmq_ctx_destroy_func(_zmq_context);
+    
+    insane_free(zmq_capture_addr);
+
+    rc = pthread_mutex_destroy(&do_shutdown);
+    if (rc != 0)
+        err_print("pthread_mutex_destroy failed: (%d): %s", rc, strerror(rc));
+    else
+        debug_print("pthread_mutex_destroy do_shutdown (%d): %s", rc, strerror(rc));
+
+    rc = pthread_mutexattr_destroy(&mattr);
+    if (rc != 0)
+        err_print("pthread_mutexattr_destroy failed: (%d): %s", rc, strerror(rc));
+    else
+        debug_print("pthread_mutexattr_destroy mattr (%d): %s", rc, strerror(rc));
+
+    info_print("exit");
+}
+
+int main(int argc, char* argv[]) {
+    int rc;
+    char c;
+    
+    int numCPU = sysconf( _SC_NPROCESSORS_ONLN );
+
+    signal(SIGINT, sigproc);
+    signal(SIGQUIT, sigproc);
+    signal(SIGTERM, sigproc);
+    signal(SIGINT, sigproc);
+
+    while(( c = getopt(argc,argv,"z:r:t:v:")) != -1) {
+        switch(c) {
+            case 'z':
+                zmq_capture_addr = strdup(optarg);
+                break;
+            case 't':
+                thread_multi = atoi(optarg);
+                break;
+            case 'v':
+                verbose = fmax(atoi(optarg), 1);
+                info_print("using verbose mode %d", verbose);
+                break;
+        }
+    }
+
+    num_thread = fmax(numCPU * thread_multi, 1);
+    
+    if (on_exit(main_exit, NULL) != 0) {
+        err_print("on_exit failed");
+        exit(EXIT_FAILURE);
+    }
+
+    if(zmq_capture_addr == NULL) {
+        err_print("-z zmq_capture_addr required");
+        exit(EXIT_FAILURE);  
+    }
+
+    debug_print("num_thread: %d", num_thread);
+
+    if ((threads = calloc(num_thread, sizeof(struct thread_stats))) == NULL) {
+        err_print("threads calloc failed (%d): %s", errno, strerror(errno));
+        raise(SIGTERM);
+    }
+
+    rc = pthread_mutexattr_init(&mattr);
+    if (rc != 0) {
+        err_print("pthread_mutexattr_init failed: (%d): %s", rc, strerror(rc));
+        raise(SIGTERM);
+    }
+
+    rc = pthread_mutexattr_settype(&mattr, PTHREAD_MUTEX_ERRORCHECK_NP);
+    if (rc != 0) {
+        err_print("pthread_mutexattr_settype failed: (%d): %s", rc, strerror(rc));
+        raise(SIGTERM);
+    }
+
+    rc = pthread_mutexattr_setpshared(&mattr, PTHREAD_PROCESS_SHARED);
+    if (rc != 0) {
+        err_print("pthread_mutexattr_setpshared failed: (%d): %s", rc, strerror(rc));
+        raise(SIGTERM);
+    }
+
+    rc = pthread_mutex_init(&do_shutdown, &mattr);
+    if (rc != 0) {
+        err_print("pthread_mutex_init failed: (%d): %s", rc, strerror(rc));
+        raise(SIGTERM);
+    }
+
+    _zmq_context = zmq_ctx_new();
+    if (_zmq_context == NULL) {
+        err_print("zmq_init failed: (%d): %s", zmq_errno(), zmq_strerror(zmq_errno()));
+        raise(SIGTERM);
+    }
+
+    rc = zmq_ctx_set (_zmq_context, ZMQ_IO_THREADS, numCPU);
+    if(rc != 0) {
+        err_print("zmq_ctx_set ZMQ_IO_THREADS failed");
+        raise(SIGTERM);
+    }
+
+    pthread_mutex_lock(&do_shutdown);
+
+    info_print("starting thread: zmq_device_main_thread");
+    rc = pthread_create(&zmq_device_main_thread, NULL, zmq_device_main, NULL);
+    if (rc != 0) {
+        err_print("pthread_create zmq_device_main_thread failed: (%d): %s", rc, strerror(rc));
+        raise(SIGTERM);
+    }
+
+    info_print("starting thread: zmq_device_stats_thread");
+    rc = pthread_create(&zmq_device_stats_thread, NULL, zmq_device_stats_main, NULL);
+    if (rc != 0) {
+        err_print("pthread_create zmq_device_stats_thread failed: (%d): %s", rc, strerror(rc));
+        raise(SIGTERM);
+    }
+
+    for(int i=0; i<num_thread; i++) {
+        snprintf(threads[i].name, sizeof(threads[i].name), "parser-thread-%d", i);
+
+        info_print("starting thread: %s", threads[i].name);
+
+        rc = pthread_create(&threads[i].pd_thread, NULL, parser_main_thread, (void *)(intptr_t)i);
+        if (rc != 0) {
+            err_print("pthread_create %s failed: (%d): %s", threads[i].name, rc, strerror(rc));
+            raise(SIGTERM);
+        }
+    }
+
+    signal(SIGALRM, my_sigalarm);
+    alarm(ALARM_SLEEP);
+
+    info_print("entering main loop");
+
+    while(!needQuit(&do_shutdown)) {
+        sleep(1);
+    }
+
+    return 0;
+}
+
+// http://www.antisip.com/doc/exosip2/
+// http://www.gnu.org/software/osip/doc/html/
+// http://sofia-sip.sourceforge.net/refdocs/sip/annotated.html

@@ -1,0 +1,568 @@
+{% extends "templates/home.html" %}
+
+{% load my_filter %}
+
+{% block head %}
+<style type="text/css">
+    .datagrid-row-over td{
+        background: #87CEEB;
+    }
+	.datagrid-row-selected td {
+        background: #87CEEB;
+        font-weight: bold;
+	}
+</style>
+<script type="text/javascript" src="/static/easyui-ext/datagrid-filter.js"></script>
+<script type="text/javascript" src="/static/easyui-ext/datagrid-detailview.js"></script>
+
+<script type="text/javascript" src="/static/js/jquery.fileDownload.js"></script>
+
+<script type="text/javascript">
+$( document ).ready(function() {
+    $('#dg').datagrid({
+        view: detailview,
+        fitColumns: true,
+        fit: true,
+
+        detailFormatter: function(index,row) {
+            return '<div style="padding:2px"><table class="ddv" style="width:100%;" ></table></div>';
+        },
+        onDblClickRow: function(index) {
+            var expander = $('#dg').datagrid('getExpander', index);
+
+            if (expander.hasClass('datagrid-row-expand')) {
+                $('#dg').datagrid('expandRow', index);
+            } else {
+                $('#dg').datagrid('collapseRow', index);
+            }
+        },
+        onRowContextMenu: function(e,index,row) {
+            e.preventDefault();
+
+            var item = $('#mm').menu('findItem', 'Sequence flow');
+            $('#mm').menu('removeItem', item.target);
+
+            item = $('#mm').menu('findItem', 'Message');
+            $('#mm').menu('removeItem', item.target);
+
+            item = $('#mm').menu('findItem', 'Save flow');
+            $('#mm').menu('removeItem', item.target);
+
+            $('#mm').menu('appendItem', {
+                text: 'Message',
+                iconCls: 'icon-search',
+                onclick: function() {
+                    openDiag( row.id );
+                }
+            });
+
+            $('#mm').menu('appendItem', {
+                text: 'Sequence flow',
+                onclick: function() {
+                    createFlowWin( row.id );
+                }
+            });
+
+            $('#mm').menu('appendItem', {
+                text: 'Save flow',
+                onclick: function() {
+                    saveFlow( row.id );
+                }
+            });
+
+            $('#mm').menu('show', {
+                left: e.pageX,
+                top: e.pageY
+            });
+        },
+        onExpandRow: function(index,row){
+            $('#dg').datagrid('fixDetailRowHeight',index);
+            $('#dg').datagrid('resize');
+
+            var ddv = $(this).datagrid('getRowDetail',index).find('table.ddv');
+            var dgindex = index;
+
+            ddv.datagrid({
+                view: detailview,
+                method: 'get',
+                url:'/search?&grouping=0&rows=1000&page=0&sip_callid=' + row.callid,
+                fitColumns: true,
+                fit: false,
+                singleSelect: true,
+                rownumbers: false,
+                height: 'auto',
+                detailFormatter: function(index,row) {
+                    return '<div class="dddv" style="padding:5px 0"> </div>';
+                },
+                rowStyler: function(index,row) {
+                    return "background-color:"+ row.color +";";
+                },
+                columns:[[
+                    {field:'id', title:'Id'},
+                    {field:'date', title:'Date/Time', formatter: function(value,row,index) {
+                            return unixTimeToDate(row.date);
+                        }
+                    },
+                    {field:'source_ip', title:'Source IP'},
+                    {field:'destination_ip', title:'Destination IP'},
+                    {field:'callid', title:'Call ID'},
+                    {field:'method', title:'Method'},
+                    {field:'from_user', title:'From user'},
+                    {field:'to_user', title:'To user'},
+                ]],
+                onCollapseRow: function(index,row) {
+                    ddv.datagrid('fixDetailRowHeight',index);
+                    ddv.datagrid('resize');
+
+                    $('#dg').datagrid('fixDetailRowHeight', dgindex);
+                    $('#dg').datagrid('resize');
+                },
+                onExpandRow: function(index,row) {
+                    var dddv = $(this).datagrid('getRowDetail', index).find('div.dddv');
+                    var jsonURL = "/msg?id=" + row.id;
+
+                    dddv.panel('clear').panel({
+                        href: jsonURL,
+                        cache: true,
+                        border: false,
+                        fit: false,
+                        noheader: true,
+                        extractor: function(data) {
+                            d = JSON.parse(data);
+                            msg = '<pre style="white-space: pre-wrap">' + d.msg + '</pre>';
+                            return msg;
+                        },
+                        onBeforeLoad: function() {
+                            ddv.datagrid('fixDetailRowHeight', index);
+                            ddv.datagrid('resize');
+
+                            $('#dg').datagrid('fixDetailRowHeight', dgindex);
+                            $('#dg').datagrid('resize');
+                        },
+                        onLoad: function() {
+                            ddv.datagrid('fixDetailRowHeight', index);
+                            ddv.datagrid('resize');
+
+                            $('#dg').datagrid('fixDetailRowHeight', dgindex);
+                            $('#dg').datagrid('resize');
+                        }
+                    });
+                },
+                onDblClickRow: function(index,field,value) {
+                    createFlowWin(field.id);
+                    $('#dg').datagrid('resize');
+                },
+                onResize: function() {
+                    ddv.datagrid('fixDetailRowHeight',index);
+                    $('#dg').datagrid('fixDetailRowHeight', dgindex);
+                },
+            });
+        },
+        onCollapseRow: function(index,row) {
+            $('#dg').datagrid('fixDetailRowHeight',index);
+            $('#dg').datagrid('resize');
+        },
+        rowStyler: function(index,row) {
+            return "background-color:"+ row.color +";";
+        },
+        columns:[[
+            {field:'id', title:'Id'},
+            {field:'date', title:'Date/Time', formatter: function(value,row,index) {
+                    return unixTimeToDate(row.date);
+                }
+            },
+            {field:'source_ip', title:'Source IP'},
+            {field:'destination_ip', title:'Destination IP'},
+            {field:'callid', title:'Call ID'},
+            {field:'method', title:'Method'},
+            {field:'from_user', title:'From user'},
+            {field:'to_user', title:'To user'}
+        ]],
+        onHeaderContextMenu: function(e, field){
+            e.preventDefault();
+            if (!$('#tmenu').length){
+                createColumnMenu();
+            }
+            $('#tmenu').menu('show', {
+                left:e.pageX,
+                top:e.pageY
+            });
+        },
+        remoteFilter: false,
+        filterDelay: 200,
+        onLoadSuccess: function(data) {
+            $( "#SearchBtn" ).prop( "disabled", false );
+            $('#dg').datagrid('resize');
+        },
+        onLoadError: function(data, param){
+            d = JSON.parse(data.responseText);
+            text = '<div class="alert-danger"><span class="glyphicon glyphicon-exclamation-sign" aria-hidden="true"></span> '+ d.result +': '+ d.msg +"</div>";
+            if (d.result == "warning") {
+                text = '<div class="alert-warning"><span class="glyphicon glyphicon-exclamation-sign" aria-hidden="true"></span> '+ d.result +': '+ d.msg +"</div>";
+            }
+            $.messager.show({
+                title: d.result,
+                msg: text,
+                timeout: 60000
+            });
+            console.log(d);
+
+            $( "#SearchBtn" ).prop( "disabled", false );
+        }
+    });
+
+    $("#malformed").change(function() {
+        if(this.checked) {
+            $("#grouping").prop('checked', false);
+            $("#grouping").prop('disabled', true);
+        } else {
+            $("#grouping").prop('disabled', false);
+        }
+    });
+
+    $("#search_form").submit(function(event) {
+        loaddata();
+        event.preventDefault();
+    });
+});
+
+</script>
+{% endblock %}
+
+{% block content %}
+
+<script type="text/javascript">
+
+    function openDiag(id) {
+
+        $('#dlg').dialog('open');
+        $('#dlg').dialog('setTitle', "Message: " + id);
+
+        $('#dialogBoxTxt').empty().append("<span class='panel-loading'>SIP Message loading...</span>");
+
+        var jsonURL = "/msg?id=" + id;
+        $.getJSON(jsonURL, function (json) {
+            msg = '<pre style="white-space: pre-wrap">' + json.msg + '</pre>';
+            //console.log(msg);
+
+            $('#dialogBoxTxt').empty().append(msg);
+        })
+        .fail(function() {
+            $('#dialogBoxTxt').empty().append('Error');
+            console.log( "error" );
+        })
+        .always(function() {
+            console.log( "complete" );
+        });
+    }
+
+function loaddata() {
+    url="/search";
+    url += "?grouping=" + ~~$("#grouping").is(":checked");
+    url += "&malformed=" + ~~$("#malformed").is(":checked");
+
+    url += "&sip_callid=" + $("#sip_callid").val();
+    url += "&sip_method=" + $('#sip_method').combobox('getValue');
+    url += "&from_user=" + $("#from_user").val();
+    url += "&to_user=" + $("#to_user").val();
+    url += "&src_ip=" + $("#src_ip").val();
+    url += "&dst_ip=" + $("#dst_ip").val();
+    url += "&date_start=" + $("#date_start").datetimebox('getValue');
+    url += "&date_end=" + $("#date_end").datetimebox('getValue');
+
+    console.log(url);
+
+    $('#dg').datagrid('loadData', []);
+
+    $('#dg').datagrid({
+        url: url,
+        onBeforeLoad: function(param) {
+            $( "#SearchBtn" ).prop( "disabled", true );
+        }
+    });
+
+    return false;
+}
+
+function unixTimeToDate(UNIX_timestamp) {
+    var a = new Date(UNIX_timestamp*1000);
+
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    var year = a.getUTCFullYear();
+    var month = months[a.getUTCMonth()];
+    var date = a.getUTCDate();
+    var hour = a.getUTCHours();
+    var min = a.getUTCMinutes();
+    var sec = a.getUTCSeconds();
+
+    //var time = date + '/' + month + '/' + year + ' ' + (hour<10?('0'+hour):hour) + ':' + (min<10?('0'+min):min) + ':' + (sec<10?('0'+sec):sec) ;
+
+    var time = year+'-'+(month<10?('0'+month):month)+'-'+(date<10?('0'+date):date)+" "+(hour<10?('0'+hour):hour)+":"+(min<10?('0'+min):min);
+
+    return time;
+}
+
+function dateFormatter(date){
+    var y = date.getFullYear();
+    var m = date.getMonth()+1;
+    var d = date.getDate();
+
+    var h = date.getHours();
+    var M = date.getMinutes();
+
+    var ret=y+'-'+(m<10?('0'+m):m)+'-'+(d<10?('0'+d):d)+" "+(h<10?('0'+h):h)+":"+(M<10?('0'+M):M);
+
+    return ret;
+}
+
+function DateParser(s){
+    if (!s) return new Date();
+    var ss = (s.split('-'));
+
+    var y = parseInt(ss[0],10);
+    var m = parseInt(ss[1],10);
+
+    var dhm = (ss[2].split(' '))
+    var d = parseInt(dhm[0],10);
+
+    var hm = (dhm[1].split(':'))
+
+    var h = parseInt(hm[0],10);
+    var M = parseInt(hm[1],10);
+
+    if (!isNaN(y) && !isNaN(m) && !isNaN(d) && !isNaN(h) && !isNaN(M)) {
+        return new Date(y ,m-1, d, h, M);
+    } else {
+        return new Date();
+    }
+}
+
+function saveFlow(id) {
+    $.fileDownload("{% url 'imageSave' %}?download=1&id="+ id, {
+        prepareCallback: function(url) {
+            $('#dlgSave').dialog('open');
+        },
+        successCallback: function(url) {
+            $('#dlgSave').dialog('close');
+        },
+        failCallback: function(responseHtml, url) {
+            $('#dlgSave').dialog('close');
+            text = '<div class="alert-danger"><span class="glyphicon glyphicon-exclamation-sign" aria-hidden="true"></span>Error while generate flow to save</div>';
+
+            $.messager.show({
+                title: "Error",
+                msg: text,
+                timeout: 60000
+            });
+
+            console.log(responseHtml);
+        }
+    });
+}
+
+function createFlowWin(id) {
+    $('#win').window('close');
+
+    $('#win').window({
+        title: 'Sequence flow for id: ' + id,
+        tools: [{
+            iconCls: 'icon-save',
+            handler: function() {
+                saveFlow(id);
+            }
+        }]
+    });
+
+    $('#win').window('open');
+    $('#win').window('center');
+    $('#win').window('refresh', '/imageView?id=' + id);
+}
+
+function createColumnMenu(){
+    var tmenu = $('<div id="tmenu" style="width:100px;"></div>').appendTo('body');
+    var fields = $('#dg').datagrid('getColumnFields');
+
+    for(var i=0; i<fields.length; i++){
+        $('<div iconCls="icon-ok"/>').html(fields[i]).appendTo(tmenu);
+    }
+
+    tmenu.menu({
+        onClick: function(item){
+            if (item.iconCls=='icon-ok'){
+                $('#dg').datagrid('hideColumn', item.text);
+                tmenu.menu('setIcon', {
+                    target: item.target,
+                    iconCls: 'icon-empty'
+                });
+            } else {
+                $('#dg').datagrid('showColumn', item.text);
+                tmenu.menu('setIcon', {
+                    target: item.target,
+                    iconCls: 'icon-ok'
+                });
+            }
+        }
+    });
+}
+</script>
+
+<div id="tt" class="easyui-tabs"
+     style="height: auto"
+     data-options="plain: true, narrow: true, border: true">
+
+<div title="Search" style="padding-right: 10px">
+
+<form id="search_form" action="." method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+
+    <table  cellpadding="5" class="table table-striped">
+        <tr>
+            <td class="col-md-1">SIP Call-ID:</td>
+            <td>
+                <input class="easyui-textbox" type="text" name="sip_callid" id="sip_callid"></input>
+            </td>
+            <td class="col-md-1">Method:</td>
+            <td>
+                <select id="sip_method" class="easyui-combobox" style="width: 131px;">
+                    <option value="">Select method</option>
+                    <option>INVITE</option>
+                    <option>ACK</option>
+                    <option>BYE</option>
+                    <option>CANCEL</option>
+                    <option>OPTIONS</option>
+                    <option>REGISTER</option>
+                    <option>PRACK</option>
+                    <option>SUBSCRIBE</option>
+                    <option>NOTIFY</option>
+                    <option>PUBLISH</option>
+                    <option>INFO</option>
+                    <option>REFER</option>
+                    <option>MESSAGE</option>
+                    <option>UPDATE</option>
+                </select>
+                <script type="text/javascript">
+                    $(function(){
+                        $('#sip_method').combo({
+                            editable: false
+                        });
+                    });
+                </script>
+            </td>
+        </tr>
+
+        <tr>
+            <td class="col-md-1">From user:</td>
+            <td class="col-md-1">
+                <input class="easyui-textbox" type="text" name="from_user" id="from_user"></input>
+            </td>
+
+            <td class="col-md-1">To user:</td>
+            <td >
+                <input class="easyui-textbox" type="text" name="to_user" id="to_user"></input>
+            </td>
+        </tr>
+
+        <tr>
+            <td class="col-md-1">Src IP:</td>
+            <td>
+                <input class="easyui-textbox" type="text" name="src_ip" id="src_ip"></input>
+            </td>
+
+            <td class="col-md-1">Dst IP:</td>
+            <td>
+                <input class="easyui-textbox" type="text" name="dst_ip" id="dst_ip"></input>
+            </td>
+        </tr>
+
+        <tr>
+            <td class="col-md-1">Src Port:</td>
+            <td>
+                <input class="easyui-textbox" type="text" name="src_port" id="src_port"></input>
+            </td>
+
+            <td class="col-md-1">Dst Port:</td>
+            <td>
+                <input class="easyui-textbox" type="text" name="dst_port" id="dst_port"></input>
+            </td>
+        </tr>
+
+        <tr>
+            <td class="col-md-1">Start date:</td>
+            <td>
+                <input class="easyui-datetimebox" value="{% current_time '%Y-%m-%d %H:%M' 1 %}" data-options="required: true, formatter: dateFormatter, parser: DateParser, showSeconds:false" id="date_start" name="date_start">
+            </td>
+
+            <td class="col-md-1">End date:</td>
+            <td>
+                <input class="easyui-datetimebox" data-options="formatter: dateFormatter, parser: DateParser, showSeconds:false" id="date_end" name="date_end">
+            </td>
+        </tr>
+
+        <tr>
+            <td colspan="2">
+                <div class="checkbox">
+                    <label for="grouping">
+                        <input class="easyui-checkbox" type="checkbox" name="grouping" id="grouping" value="1" checked>
+                        Group results by Call-ID
+                    </label>
+                </div>
+            </td>
+
+            <td colspan="2">
+                <div class="checkbox">
+                    <label for="malformed">
+                        <input class="easyui-checkbox" type="checkbox" name="malformed" id="malformed" value="1">
+                        Only malformed packets
+                    </label>
+                </div>
+            </td>
+        </tr>
+
+        <tr>
+            <td colspan="4">
+                <input id="SearchBtn" type="submit" data-options="iconCls:'icon-search'" style="width:80px" value="Search"></input>
+            </td>
+        </tr>
+
+    </table>
+</form>
+
+<div id="cc" class="easyui-layout" style="width:100%; height: 80%;">
+    <div data-options="region:'center', border:false " >
+        <table id="dg" class="easyui-datagrid" style="height: 200px; width:100%;"
+               data-options="autoRowHeight: true,
+               collapsible: false,
+               method:'get'"
+               rownumbers="true" pagination="true"
+               pageList="[5,10,50,100,500]"
+               pageSize="50"
+               singleSelect="true">
+        </table>
+    </div>
+</div>
+
+</div>
+</div>
+
+<div id="dlg" class="easyui-dialog" data-options="closed: true, resizable:true, minimizable: false, maximizable:true, collapsible: false" style="width:500px; height:400px;">
+    <span id="dialogBoxTxt"> </span>
+</div>
+
+<div id="dlgSave" class="easyui-dialog" data-options="title: 'Loading', modal: true, closed: true, resizable: false, minimizable: false, maximizable: false, collapsible: false"
+        style="width: 500px; height: 120px; padding:10px">
+    <h4 id="dialogSaveBoxTxt" align="center" class="panel-loading">We are preparing your flow to save, please wait.</h4>
+</div>
+
+<div id="mm" class="easyui-menu" style="width:120px;">
+    <div>Sequence flow</div>
+    <div>Message</div>
+    <div>Save flow</div>
+</div>
+
+<div id="win" class="easyui-window"
+     data-options="iconCls:'icon-search', closed: true, minimizable: false, collapsible: false"
+     style="width: 800px; height: 500px; padding:10px">
+</div>
+
+{% endblock %}

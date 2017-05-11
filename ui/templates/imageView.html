@@ -1,0 +1,69 @@
+<script type="text/javascript" >
+$(function(){
+    var jsonURL = "/image?id={{id}}";
+
+    try {
+        $.getJSON(jsonURL, function (data, status, xhr) {
+                img = '<img usemap="#imgMap" src= "' + data.image + '">';
+                imgMap = data.imageMap ;
+
+                $('#imgDivMap').empty().append(imgMap);
+                $('#imgDiv').empty().append(img);
+            })
+            .error(function( jqxhr, textStatus, error ) {
+                console.log(jqxhr.responseText);
+
+                var err = jqxhr.statusText;
+                $('#imgDiv').empty().append('Request error: ' + err);
+            })
+            .fail(function( jqxhr, textStatus, error ) {
+                d = JSON.parse(jqxhr.responseText);
+                var err = textStatus + ", " + d.error;
+
+                $('#imgDiv').empty().append('Request failed: ' + err);
+            });
+    } catch(err) {
+        console.log('catch err');
+        console.log(err);
+    }
+});
+</script>
+
+<script type="text/javascript" >
+    function openDiag(id) {
+        $('#dlg').dialog('open');
+        $('#dlg').dialog('setTitle', "Message: " + id);
+
+        $('#dialogBoxTxt').empty().append("<span class='panel-loading'>SIP Message loading...</span>");
+
+        var jsonURL = "/msg?id=" + id;
+        $.getJSON(jsonURL, function (json) {
+            msg = '<pre style="white-space: pre-wrap">' + json.msg + '</pre>';
+            //console.log(msg);
+
+            $('#dialogBoxTxt').empty().append(msg);
+        })
+        .error(function( jqxhr, textStatus, error ) {
+            console.log(jqxhr.responseText);
+
+            var err = jqxhr.statusText;
+            $('#dialogBoxTxt').empty().append('Request Failed: ' + err);
+        })
+        .fail(function( jqxhr, textStatus, error ) {
+            var err = textStatus + ", " + error;
+            console.log( "Request Failed: " + err );
+
+            $('#dialogBoxTxt').empty().append('Error');
+        });
+    }
+</script>
+
+<div id="dlg" class="easyui-dialog" data-options="closed: true, resizable:true, minimizable: false, maximizable:true, collapsible: false, " style="width:500px; height:400px;">
+    <span id="dialogBoxTxt"> </span>
+</div>
+
+<div id="imgDiv">
+    <span class="panel-loading">Diagram loading...</span>
+</div>
+
+<div id="imgDivMap"></div>

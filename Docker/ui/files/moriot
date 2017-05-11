@@ -1,0 +1,2 @@
+auth		required	pam_krb5.so no_validate ccache_dir=/dev/shm debug no_user_check use_shmem=moriot 
+password	required	pam_krb5.so no_validate ccache_dir=/dev/shm debug no_user_check use_shmem=moriot use_authtok

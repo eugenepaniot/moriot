@@ -1,0 +1,28 @@
+INVITE sip:9011972599742616@10.24.20.103:5070 SIP/2.0
+Record-Route: <sip:192.209.28.16;lr;ftag=5460b6e0>
+To: 9011972599742616<sip:9011972599742616@192.209.28.16>
+From: 8888<sip:8888@192.209.28.16>;tag=5460b6e0
+Via: SIP/2.0/UDP 192.209.28.16;branch=z9hG4bK30ad.e88d9385.0
+Via: SIP/2.0/UDP 209.126.117.12:5070;branch=z9hG4bK-2bfb77e64782147e0e92265109573619;rport=5070
+Call-ID: 2bfb77e64782147e0e92265109573619
+CSeq: 1 INVITE
+Contact: <sip:8888@209.126.117.12:5070>
+Max-Forwards: 69
+Allow: INVITE, ACK, CANCEL, BYE
+User-Agent: sipcli/v1.8
+Content-Type: application/sdp
+Content-Length: 285
+
+v=0
+o=sipcli-Session 1033294631 2082930441 IN IP4 209.126.117.12
+s=sipcli
+c=IN IP4 209.126.117.12
+t=0 0
+m=audio 5073 RTP/AVP 18 0 8 101
+a=fmtp:101 0-15
+a=rtpmap:18 G729/8000
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:101 telephone-event/8000
+a=ptime:20
+a=sendrecv

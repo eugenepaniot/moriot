@@ -1,0 +1,74 @@
+{% extends "templates/home.html" %}
+
+{% block content %}
+
+<script type="text/javascript">
+$( document ).ready(function() {
+
+});
+
+</script>
+
+<div id="tt" class="easyui-tabs"
+     style="height: auto"
+     data-options="plain: true, narrow: true, border: true">
+
+    <div title="Stats" style="padding:10px">
+
+        <div id="aa" class="easyui-accordion" >
+
+            <div title="Top 10 register"  style="overflow:auto;padding:10px;">
+                <h3 style="color:#0099FF;">Top 10 register</h3>
+                <p>
+                    The From header field indicates the logical identity of the initiator of the request
+                </p>
+                <table class="easyui-datagrid" style="width:100%;height:300"
+                        data-options="url:'/static/tmp/top10-register.json',fitColumns:false,singleSelect:true">
+                    <thead>
+                        <tr>
+                            <th data-options="field:'phone',width:300">Phone</th>
+                            <th data-options="field:'count',width:100">Count</th>
+                        </tr>
+                    </thead>
+                </table>
+            </div>
+
+            <div title="Top 10 caller"  style="overflow:auto;padding:10px;">
+                <h3 style="color:#0099FF;">Top 10 caller</h3>
+                <p>
+                    The From header field indicates the logical identity of the initiator of the request
+                </p>
+                <table class="easyui-datagrid" style="width:100%;height:300"
+                        data-options="url:'/static/tmp/top10-caller.json',fitColumns:false,singleSelect:true">
+                    <thead>
+                        <tr>
+                            <th data-options="field:'phone',width:300">Phone</th>
+                            <th data-options="field:'count',width:100">Count</th>
+                        </tr>
+                    </thead>
+                </table>
+            </div>
+
+            <div title="Top 10 calling"  style="overflow:auto;padding:10px;">
+                <h3 style="color:#0099FF;">Top 10 calling</h3>
+                <p>
+                    The To header field first and foremost specifies the desired "logical" recipient of the request, or the address-of-record of the user or resource that is the target of this request.
+                </p>
+                <table class="easyui-datagrid" style="width:100%;height:300"
+                            data-options="url:'/static/tmp/top10-calling.json',fitColumns:false,singleSelect:true">
+                    <thead>
+                        <tr>
+                            <th data-options="field:'phone',width:300">Phone</th>
+                            <th data-options="field:'count',width:100">Count</th>
+                        </tr>
+                    </thead>
+                </table>
+            </div>
+
+        </div>
+
+
+    </div>
+</div>
+
+{% endblock %}
